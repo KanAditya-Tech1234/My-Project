@@ -1,0 +1,15 @@
+{
+  "name": "drone-tracker-server",
+  "version": "1.0.0",
+  "description": "Receives GPS data and photos from the EC200U tracker and the Waveshare ESP32-S3 SIM7670G camera board and shows them live on a map",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

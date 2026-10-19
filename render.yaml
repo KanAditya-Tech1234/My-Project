@@ -1,0 +1,12 @@
+# Render Blueprint — lets Render create/update the web service from this repo.
+# (Only needed if you deploy via "New > Blueprint". An existing web service
+# that already points at this repo keeps working without it.)
+services:
+  - type: web
+    name: tracker-drone
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true

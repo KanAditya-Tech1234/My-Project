@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Drone Live Tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #map { height: 100vh; width: 100%; background: #111; }
+
+  #panel {
+    position: absolute; top: 12px; right: 12px; z-index: 1000;
+    background: rgba(20,20,20,0.88); color: #fff; padding: 14px 18px;
+    border-radius: 10px; font-size: 13px; width: 260px;
+    max-height: calc(100vh - 24px); overflow-y: auto; box-sizing: border-box;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  }
+  #panel h3 { margin: 0 0 8px 0; font-size: 15px; letter-spacing: 0.3px; }
+  #panel .row { display: flex; justify-content: space-between; gap: 8px; margin: 3px 0; }
+  #panel .row span:first-child { opacity: 0.7; white-space: nowrap; }
+  #panel .row span:last-child { text-align: right; }
+  #status.live { color: #4caf50; font-weight: 600; }
+  #status.late { color: #ffc107; font-weight: 600; }
+  #status.stale { color: #ff9800; font-weight: 600; }
+
+  #panel hr { border: none; border-top: 1px solid rgba(255,255,255,0.15); margin: 10px 0; }
+
+  #photoBox { margin-top: 4px; }
+  #photoBox img {
+    width: 100%; border-radius: 6px; display: block; background: #000; cursor: zoom-in;
+  }
+  #photoBox .empty { opacity: 0.6; font-size: 12px; padding: 18px 0; text-align: center; border: 1px dashed #555; border-radius: 6px; }
+  #photoCaption { font-size: 11px; opacity: 0.75; margin-top: 4px; }
+
+  #delayLabel { display: block; margin-bottom: 4px; opacity: 0.7; }
+  #delaySelect {
+    width: 100%; padding: 6px; border-radius: 6px; border: 1px solid #444;
+    background: #222; color: #fff; font-size: 12px; margin-bottom: 6px;
+  }
+  #delayStatus { font-size: 11px; min-height: 14px; opacity: 0.85; }
+  #delayStatus.ok { color: #4caf50; }
+  #delayStatus.err { color: #f44336; }
+
+  #resetBtn {
+    margin-top: 10px; width: 100%; padding: 6px 0; border: none;
+    border-radius: 6px; background: #333; color: #fff; cursor: pointer; font-size: 12px;
+  }
+  #resetBtn:hover { background: #444; }
+
+  .photo-popup img { width: 220px; border-radius: 4px; display: block; }
+  .photo-popup div { font-size: 11px; margin-top: 4px; }
+
+  #lightbox {
+    display: none; position: fixed; inset: 0; z-index: 2000;
+    background: rgba(0,0,0,0.9); align-items: center; justify-content: center; cursor: zoom-out;
+  }
+  #lightbox img { max-width: 95vw; max-height: 95vh; }
+
+  @media (max-width: 600px) {
+    #panel { top: auto; bottom: 8px; right: 8px; left: 8px; width: auto; max-height: 50vh; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <h3>🚁 Tracker Status</h3>
+  <div class="row"><span>ID</span><span id="trackerId">--</span></div>
+  <div class="row"><span>Lat</span><span id="lat">--</span></div>
+  <div class="row"><span>Lon</span><span id="lon">--</span></div>
+  <div class="row"><span>Alt</span><span id="alt">--</span></div>
+  <div class="row"><span>Time</span><span id="ts">--</span></div>
+  <div class="row"><span>Status</span><span id="status" class="stale">Waiting...</span></div>
+  <div class="row"><span>Last data</span><span id="ago">--</span></div>
+  <div class="row"><span>Next expected</span><span id="next">--</span></div>
+  <div class="row"><span>Actual interval</span><span id="measured">--</span></div>
+
+  <hr>
+
+  <div class="row"><span>📷 Latest photo</span><span id="photoCount"></span></div>
+  <div id="photoBox"><div class="empty">No photo received yet</div></div>
+  <div id="photoCaption"></div>
+
+  <hr>
+
+  <label id="delayLabel" for="delaySelect">Transmission delay</label>
+  <select id="delaySelect">
+    <option value="1000">1 second</option>
+    <option value="2000">2 seconds</option>
+    <option value="5000">5 seconds</option>
+    <option value="10000">10 seconds</option>
+    <option value="15000">15 seconds</option>
+    <option value="30000">30 seconds</option>
+    <option value="60000">60 seconds</option>
+  </select>
+  <div id="delayStatus"></div>
+
+  <button id="resetBtn">Clear trail &amp; photos</button>
+</div>
+
+<div id="lightbox"><img alt="Drone photo" /></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+  const map = L.map('map').setView([23.0580, 72.5210], 13);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  // Custom quadcopter-drone icon (inline SVG) instead of an emoji.
+  const droneSvg = `
+    <svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <g stroke="#ffffff" stroke-width="2">
+        <line x1="16" y1="16" x2="48" y2="48" />
+        <line x1="48" y1="16" x2="16" y2="48" />
+      </g>
+      <circle cx="16" cy="16" r="9" fill="#2196f3" stroke="#0d47a1" stroke-width="1.5" />
+      <circle cx="48" cy="16" r="9" fill="#2196f3" stroke="#0d47a1" stroke-width="1.5" />
+      <circle cx="16" cy="48" r="9" fill="#2196f3" stroke="#0d47a1" stroke-width="1.5" />
+      <circle cx="48" cy="48" r="9" fill="#2196f3" stroke="#0d47a1" stroke-width="1.5" />
+      <rect x="26" y="26" width="12" height="12" rx="3" fill="#ffb300" stroke="#7a4f00" stroke-width="1.5" />
+    </svg>`;
+
+  const droneIcon = L.divIcon({
+    className: 'drone-marker',
+    html: droneSvg,
+    iconSize: [34, 34],
+    iconAnchor: [17, 17]
+  });
+
+  // Small camera dot for every point that came with a photo.
+  const photoIcon = L.divIcon({
+    className: 'photo-marker',
+    html: '<div style="width:12px;height:12px;border-radius:50%;background:#ff5722;border:2px solid #fff;box-shadow:0 0 3px #000"></div>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8]
+  });
+
+  let marker = null;
+  const photoLayer = L.layerGroup().addTo(map);
+
+  // Dashed trail instead of a solid line.
+  let trail = L.polyline([], {
+    color: '#2196f3',
+    weight: 3,
+    dashArray: '8, 8'
+  }).addTo(map);
+
+  const $ = id => document.getElementById(id);
+
+  let lastSeq = 0;              // newest sequence number we've drawn
+  let generation = null;        // server data generation (changes on reset/restart)
+  let points = [];              // everything drawn so far
+  let hasFramed = false;
+  let intervalMs = 5000;        // current transmission delay (from server)
+  let lastReceivedAt = null;    // Date of the newest point/photo
+  let clockSkewMs = 0;          // server clock - browser clock
+  let latestPhotoId = null;
+
+  function fmtSeconds(ms) {
+    const s = ms / 1000;
+    return s < 10 ? `${s.toFixed(1)} s` : `${Math.round(s)} s`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function addPhotoMarker(p) {
+    if (!p.photoId) return;
+    const url = `/api/photos/${encodeURIComponent(p.photoId)}.jpg`;
+    L.marker([p.lat, p.lon], { icon: photoIcon })
+      .bindPopup(`<div class="photo-popup"><img src="${url}" loading="lazy" alt="photo" />
+        <div>${escapeHtml(p.trackerId || '')} · ${escapeHtml(p.timestamp || p.receivedAt)}</div></div>`)
+      .addTo(photoLayer);
+  }
+
+  function drawNewPoints(newPoints) {
+    if (!newPoints.length) return;
+    points = points.concat(newPoints);
+    if (points.length > 1000) points = points.slice(-1000);
+    newPoints.forEach(addPhotoMarker);
+    trail.setLatLngs(points.map(p => [p.lat, p.lon]));
+
+    const latest = points[points.length - 1];
+    if (!marker) {
+      marker = L.marker([latest.lat, latest.lon], { icon: droneIcon }).addTo(map);
+    } else {
+      marker.setLatLng([latest.lat, latest.lon]);
+    }
+
+    if (!hasFramed) {
+      map.fitBounds(trail.getBounds(), { maxZoom: 15, padding: [40, 40] });
+      hasFramed = true;
+    } else {
+      map.panTo([latest.lat, latest.lon]);
+    }
+
+    $('trackerId').textContent = latest.trackerId || '--';
+    $('lat').textContent = latest.lat.toFixed(6);
+    $('lon').textContent = latest.lon.toFixed(6);
+    $('alt').textContent = latest.altitude || '--';
+    $('ts').textContent = latest.timestamp || '--';
+  }
+
+  function showPhoto(meta, count) {
+    $('photoCount').textContent = count ? `${count} stored` : '';
+    if (!meta) {
+      latestPhotoId = null;
+      $('photoBox').innerHTML = '<div class="empty">No photo received yet</div>';
+      $('photoCaption').textContent = '';
+      return;
+    }
+    if (meta.id === latestPhotoId) return;
+    latestPhotoId = meta.id;
+    const img = new Image();
+    img.alt = 'Latest drone photo';
+    img.src = meta.url;
+    img.onclick = () => openLightbox(meta.url);
+    $('photoBox').replaceChildren(img);
+    const where = meta.lat != null ? `${meta.lat.toFixed(5)}, ${meta.lon.toFixed(5)}` : 'no GPS fix';
+    $('photoCaption').textContent =
+      `${meta.trackerId} · ${meta.timestamp || new Date(meta.receivedAt).toLocaleTimeString()} · ${Math.round(meta.size / 1024)} KB · ${where}`;
+  }
+
+  function openLightbox(url) {
+    $('lightbox').querySelector('img').src = url;
+    $('lightbox').style.display = 'flex';
+  }
+  $('lightbox').addEventListener('click', () => { $('lightbox').style.display = 'none'; });
+
+  // Measured gap between the last two arrivals, so you can see whether the
+  // drone really keeps to the delay you selected.
+  function updateMeasured() {
+    if (points.length < 2) { $('measured').textContent = '--'; return; }
+    const a = new Date(points[points.length - 2].receivedAt);
+    const b = new Date(points[points.length - 1].receivedAt);
+    $('measured').textContent = fmtSeconds(b - a);
+  }
+
+  // Runs every 250 ms so the countdown and Live/Late/Offline status track
+  // the selected delay exactly.
+  function tick() {
+    if (!lastReceivedAt) return;
+    const now = Date.now() + clockSkewMs;
+    const age = now - lastReceivedAt.getTime();
+    $('ago').textContent = `${fmtSeconds(Math.max(0, age))} ago`;
+
+    const remaining = intervalMs - age;
+    $('next').textContent = remaining > 0 ? `in ${fmtSeconds(remaining)}` : `due (${fmtSeconds(-remaining)} late)`;
+
+    // Uploads take a few seconds over 4G, so allow some slack before
+    // calling the drone late or offline.
+    const statusEl = $('status');
+    if (age <= intervalMs + 5000) {
+      statusEl.textContent = 'Live'; statusEl.className = 'live';
+    } else if (age <= intervalMs * 3 + 15000) {
+      statusEl.textContent = 'Late'; statusEl.className = 'late';
+    } else {
+      statusEl.textContent = 'Offline'; statusEl.className = 'stale';
+    }
+  }
+
+  // The server is asked every second for a tiny status object; the trail
+  // and photo are only re-fetched when something new has actually arrived.
+  // That way new data shows up within ~1 s of the drone sending it, at
+  // whatever delay is selected.
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      const st = await res.json();
+
+      clockSkewMs = new Date(st.serverTime).getTime() - Date.now();
+
+      if (st.intervalMs !== intervalMs) {
+        intervalMs = st.intervalMs;
+        ensureOption(intervalMs);
+        if (document.activeElement !== delaySelect) delaySelect.value = String(intervalMs);
+      }
+
+      if (st.generation !== generation) {
+        // Server restarted or trail was cleared somewhere else — start over.
+        if (generation !== null) clearMap();
+        generation = st.generation;
+      }
+
+      if (st.seq > lastSeq) {
+        const hres = await fetch(`/api/history?since=${lastSeq}`, { cache: 'no-store' });
+        drawNewPoints(await hres.json());
+        lastSeq = st.seq;
+        updateMeasured();
+      }
+
+      showPhoto(st.latestPhoto, st.photoCount);
+
+      const times = [st.latest && st.latest.receivedAt, st.latestPhoto && st.latestPhoto.receivedAt]
+        .filter(Boolean).map(t => new Date(t));
+      lastReceivedAt = times.length ? new Date(Math.max(...times)) : null;
+      tick();
+    } catch (e) {
+      console.error('Poll failed:', e);
+    } finally {
+      polling = false;
+    }
+  }
+
+  function clearMap() {
+    trail.setLatLngs([]);
+    photoLayer.clearLayers();
+    if (marker) { map.removeLayer(marker); marker = null; }
+    points = [];
+    lastSeq = 0;
+    hasFramed = false;
+    lastReceivedAt = null;
+    showPhoto(null, 0);
+    ['trackerId', 'lat', 'lon', 'alt', 'ts', 'ago', 'next', 'measured'].forEach(id => { $(id).textContent = '--'; });
+    $('status').textContent = 'Waiting...';
+    $('status').className = 'stale';
+  }
+
+  $('resetBtn').addEventListener('click', async () => {
+    await fetch('/api/reset', { method: 'POST' });
+    clearMap();
+  });
+
+  // ---------------------------------------------------------------
+  // DELAY CONFIG — dropdown reads/writes /api/config
+  // ---------------------------------------------------------------
+  const delaySelect = $('delaySelect');
+  const delayStatus = $('delayStatus');
+
+  function ensureOption(ms) {
+    const exists = Array.from(delaySelect.options).some(o => Number(o.value) === ms);
+    if (!exists) {
+      const opt = document.createElement('option');
+      opt.value = ms;
+      opt.textContent = `${ms / 1000}s (custom)`;
+      delaySelect.appendChild(opt);
+    }
+  }
+
+  delaySelect.addEventListener('change', async () => {
+    const newMs = Number(delaySelect.value);
+    delayStatus.textContent = 'Updating...';
+    delayStatus.className = '';
+
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intervalMs: newMs })
+      });
+      const result = await res.json();
+
+      if (res.ok) {
+        intervalMs = newMs;
+        delayStatus.textContent = `Set to ${newMs / 1000}s — the drone switches after its next upload`;
+        delayStatus.className = 'ok';
+      } else {
+        delayStatus.textContent = result.message || 'Update failed';
+        delayStatus.className = 'err';
+      }
+    } catch (e) {
+      delayStatus.textContent = 'Network error — try again';
+      delayStatus.className = 'err';
+    }
+  });
+
+  poll();
+  setInterval(poll, 1000);
+  setInterval(tick, 250);
+</script>
+</body>
+</html>
